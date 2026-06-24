@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"unicode/utf8"
 
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 	"github.com/poissondemars/Chirpy/internal/database"
@@ -45,6 +46,98 @@ func (cfg *apiConfig) handleResetMetrics(w http.ResponseWriter, r *http.Request)
 	cfg.fileserverHits.Store(0)
 }
 
+
+func (cfg *apiConfig) handleChirpCreate(w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		Body string `json:"body"`
+		UserId string `json:"user_id"`
+	}
+
+	type returnVals struct {
+		Id string `json:"id"`
+		CreatedAt string `json:"created_at"`
+		UpdatedAt string `json:"updated_at"`
+		Body string `json:"body"`
+		UserId string `json:"user_id"`
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err := decoder.Decode(&params)
+	if err != nil {
+		w.WriteHeader(400)
+		return
+	}
+
+	userId, err := uuid.Parse(params.UserId)
+	if err != nil {
+		w.WriteHeader(400)
+		return
+	}
+
+	chirpParams := database.CreateChirpParams{
+		Body: sql.NullString{String: params.Body, Valid: true},
+		UserID: uuid.NullUUID{UUID: userId, Valid: true},
+	}
+	chirp, err := cfg.dbQueries.CreateChirp(r.Context(), chirpParams,)
+	if err != nil {
+		w.WriteHeader(400)
+		return
+	}
+
+	returnVal := returnVals{
+		Id: chirp.ID.String(),
+		CreatedAt: chirp.CreatedAt.Time.GoString(),
+		UpdatedAt: chirp.UpdatedAt.Time.GoString(),
+		Body: chirp.Body.String,
+		UserId: chirp.UserID.UUID.String(),
+	}
+	data, _ := json.Marshal(returnVal)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(201)
+	w.Write(data)
+}
+
+func (cfg *apiConfig) handleUserCreate(w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		Email string `json:"email"`
+	}
+
+	type returnVals struct {
+		Id string `json:"id"`
+		CreatedAt string `json:"created_at"`
+		UpdatedAt string `json:"updated_at"`
+		Email string `json:"email"`
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err := decoder.Decode(&params)
+	if err != nil {
+		w.WriteHeader(400)
+		return
+	}
+
+	user, err := cfg.dbQueries.CreateUser(r.Context(), sql.NullString{String: params.Email, Valid: true})
+	if err != nil {
+		w.WriteHeader(400)
+		return
+	}
+
+	returnVal := returnVals{
+		Id: user.ID.String(),
+		CreatedAt: user.CreatedAt.Time.GoString(),
+		UpdatedAt: user.UpdatedAt.Time.GoString(),
+		Email: user.Email.String,
+	}
+	data, _ := json.Marshal(returnVal)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(201)
+	w.Write(data)
+}
+
 func main() {
 	godotenv.Load()
 
@@ -71,6 +164,9 @@ func main() {
 	// API
 	mux.Handle("GET /api/healthz", middlewareLog(http.HandlerFunc(handleHealthz)))
 	mux.Handle("POST /api/validate_chirp", middlewareLog(http.HandlerFunc(handleValidateChirp)))
+
+	mux.Handle("POST /api/users", middlewareLog(http.HandlerFunc(apiConfig.handleUserCreate)))
+	mux.Handle("POST /api/chirps", middlewareLog(http.HandlerFunc(apiConfig.handleChirpCreate)))
 
 	server := &http.Server{
 		Addr:    ":8080",
