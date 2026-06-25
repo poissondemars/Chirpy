@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"sync/atomic"
+	"time"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
@@ -46,11 +47,87 @@ func (cfg *apiConfig) handleResetMetrics(w http.ResponseWriter, r *http.Request)
 	cfg.fileserverHits.Store(0)
 }
 
+func (cfg *apiConfig) handleGetChirp(w http.ResponseWriter, r *http.Request) {
+	type returnVals struct {
+		Id string `json:"id"`
+		CreatedAt string `json:"created_at"`
+		UpdatedAt string `json:"updated_at"`
+		Body string `json:"body"`
+		UserId string `json:"user_id"`
+	}
+	
+	chirpId, err := uuid.Parse(r.PathValue("chirpId"))
+	if err != nil {
+		w.WriteHeader(400)
+		return
+	}
+
+	chirp, err := cfg.dbQueries.GetChirp(r.Context(), chirpId)
+	if err != nil {
+		w.WriteHeader(404)
+		return
+	}
+
+	returnVal := returnVals{
+		Id: chirp.ID.String(),
+		CreatedAt: chirp.CreatedAt.Time.Format(time.RFC3339),
+		UpdatedAt: chirp.UpdatedAt.Time.Format(time.RFC3339),
+		Body: chirp.Body.String,
+		UserId: chirp.UserID.UUID.String(),
+	}
+	data, _ := json.Marshal(returnVal)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	w.Write(data)
+}
+
+func (cfg *apiConfig) handleGetChirps(w http.ResponseWriter, r *http.Request) {
+	type chirp struct {
+		Id string `json:"id"`
+		CreatedAt string `json:"created_at"`
+		UpdatedAt string `json:"updated_at"`
+		Body string `json:"body"`
+		UserId string `json:"user_id"`
+	}
+
+	chirps, err := cfg.dbQueries.GetChirps(r.Context())
+	if err != nil {
+		w.WriteHeader(500)
+		return
+	}
+
+	response := []chirp{}
+	for _, c := range chirps {
+		response = append(response, chirp{
+			Id: c.ID.String(),
+			CreatedAt: c.CreatedAt.Time.Format(time.RFC3339),
+			UpdatedAt: c.UpdatedAt.Time.Format(time.RFC3339),
+			Body: c.Body.String,
+			UserId: c.UserID.UUID.String(),
+		})
+	}
+
+	data, err := json.Marshal(response)
+	if err != nil {
+		w.WriteHeader(500)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	w.Write(data)
+}
+
 
 func (cfg *apiConfig) handleChirpCreate(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
 		Body string `json:"body"`
 		UserId string `json:"user_id"`
+	}
+
+	type errorResp struct {
+		Error string `json:"error"`
 	}
 
 	type returnVals struct {
@@ -75,8 +152,41 @@ func (cfg *apiConfig) handleChirpCreate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	chirpLength := utf8.RuneCountInString(params.Body)
+	log.Printf("%s (%d)", params.Body, chirpLength)
+
+	if chirpLength > 140 {
+		errorResp := errorResp{
+			Error: "Chirp is too long",
+		}
+		data, err := json.Marshal(errorResp)
+
+		if err != nil {
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(400)
+		w.Write(data)
+
+		return
+	}
+
+	profaneDict := map[string]bool{
+		"kerfuffle": true,
+		"sharbert": true,
+		"fornax": true,
+	}
+	chirpWords := strings.Split(params.Body, " ")
+	for i, word := range chirpWords {
+		if profaneDict[strings.ToLower(word)] {
+			chirpWords[i] = "****"
+		}
+	}
+	cleanedChirp := strings.Join(chirpWords, " ")
+
 	chirpParams := database.CreateChirpParams{
-		Body: sql.NullString{String: params.Body, Valid: true},
+		Body: sql.NullString{String: cleanedChirp, Valid: true},
 		UserID: uuid.NullUUID{UUID: userId, Valid: true},
 	}
 	chirp, err := cfg.dbQueries.CreateChirp(r.Context(), chirpParams,)
@@ -87,8 +197,8 @@ func (cfg *apiConfig) handleChirpCreate(w http.ResponseWriter, r *http.Request) 
 
 	returnVal := returnVals{
 		Id: chirp.ID.String(),
-		CreatedAt: chirp.CreatedAt.Time.GoString(),
-		UpdatedAt: chirp.UpdatedAt.Time.GoString(),
+		CreatedAt: chirp.CreatedAt.Time.Format(time.RFC3339),
+		UpdatedAt: chirp.UpdatedAt.Time.Format(time.RFC3339),
 		Body: chirp.Body.String,
 		UserId: chirp.UserID.UUID.String(),
 	}
@@ -127,8 +237,8 @@ func (cfg *apiConfig) handleUserCreate(w http.ResponseWriter, r *http.Request) {
 
 	returnVal := returnVals{
 		Id: user.ID.String(),
-		CreatedAt: user.CreatedAt.Time.GoString(),
-		UpdatedAt: user.UpdatedAt.Time.GoString(),
+		CreatedAt: user.CreatedAt.Time.Format(time.RFC3339),
+		UpdatedAt: user.UpdatedAt.Time.Format(time.RFC3339),
 		Email: user.Email.String,
 	}
 	data, _ := json.Marshal(returnVal)
@@ -163,10 +273,11 @@ func main() {
 
 	// API
 	mux.Handle("GET /api/healthz", middlewareLog(http.HandlerFunc(handleHealthz)))
-	mux.Handle("POST /api/validate_chirp", middlewareLog(http.HandlerFunc(handleValidateChirp)))
 
 	mux.Handle("POST /api/users", middlewareLog(http.HandlerFunc(apiConfig.handleUserCreate)))
 	mux.Handle("POST /api/chirps", middlewareLog(http.HandlerFunc(apiConfig.handleChirpCreate)))
+	mux.Handle("GET /api/chirps", middlewareLog(http.HandlerFunc(apiConfig.handleGetChirps)))
+	mux.Handle("GET /api/chirps/{chirpId}", middlewareLog(http.HandlerFunc(apiConfig.handleGetChirp)))
 
 	server := &http.Server{
 		Addr:    ":8080",
@@ -181,86 +292,6 @@ func handleHealthz(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(200)
 	w.Write([]byte(`OK`))
-}
-
-func handleValidateChirp(w http.ResponseWriter, r *http.Request) {
-	type parameters struct {
-		Body string `json:"body"`
-	}
-
-	type returnVals struct {
-		CleanedBody string `json:"cleaned_body"`
-	}
-
-	type errorResp struct {
-		Error string `json:"error"`
-	}
-
-	decoder := json.NewDecoder(r.Body)
-	params := parameters{}
-	err := decoder.Decode(&params)
-	if err != nil {
-		errorResp := errorResp{
-			Error: "Something went wrong",
-		}
-		data, err := json.Marshal(errorResp)
-
-		if err != nil {
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(data)
-		w.WriteHeader(500)
-
-		return
-	}
-
-	chirpLength := utf8.RuneCountInString(params.Body)
-	log.Printf("%s (%d)", params.Body, chirpLength)
-
-	if chirpLength > 140 {
-		errorResp := errorResp{
-			Error: "Chirp is too long",
-		}
-		data, err := json.Marshal(errorResp)
-
-		if err != nil {
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(400)
-		w.Write(data)
-
-		return
-	}
-
-	profaneDict := map[string]bool{
-		"kerfuffle": true,
-		"sharbert": true,
-		"fornax": true,
-	}
-	chirpWords := strings.Split(params.Body, " ")
-	for i, word := range chirpWords {
-		if profaneDict[strings.ToLower(word)] {
-			chirpWords[i] = "****"
-		}
-	}
-	cleanedChirp := strings.Join(chirpWords, " ")
-
-	returnVal := returnVals{
-		CleanedBody: cleanedChirp,
-	}
-
-	data, err := json.Marshal(returnVal)
-	defer w.WriteHeader(200)
-	if err != nil {
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.Write(data)
 }
 
 func middlewareLog(next http.Handler) http.Handler {
