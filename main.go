@@ -289,14 +289,12 @@ func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		w.WriteHeader(400)
-		log.Fatalf("failed to fetch user by email: %w", err)
 		return
 	}
 
 	passwordMatch, err := auth.CheckPasswordHash(params.Password, user.HashedPassword)
 	if err != nil {
 		w.WriteHeader(400)
-		log.Fatalf("failed to check password: %w", err)
 		return
 	}
 	if !passwordMatch {
