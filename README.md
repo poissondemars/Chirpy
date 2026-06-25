@@ -1,8 +1,7 @@
 ## Migrations
 
 ```sh
-cd sql/schema
-goose postgres <connection_string> up
+(cd sql/schema && goose postgres $CONNECTION up)
 ```
 
 ## Queries

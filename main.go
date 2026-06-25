@@ -16,6 +16,7 @@ import (
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 	"github.com/poissondemars/Chirpy/internal/database"
+	"github.com/poissondemars/Chirpy/internal/auth"
 )
 
 type apiConfig struct {
@@ -211,6 +212,7 @@ func (cfg *apiConfig) handleChirpCreate(w http.ResponseWriter, r *http.Request) 
 
 func (cfg *apiConfig) handleUserCreate(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
+		Password string `json:"password"`
 		Email string `json:"email"`
 	}
 
@@ -229,7 +231,19 @@ func (cfg *apiConfig) handleUserCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := cfg.dbQueries.CreateUser(r.Context(), sql.NullString{String: params.Email, Valid: true})
+	hashedPassword, err := auth.HashPassword(params.Password)	
+	if err != nil {
+		w.WriteHeader(400)
+		return
+	}
+	createUserParams := database.CreateUserParams{
+		Email: sql.NullString{String: params.Email, Valid: true},
+		HashedPassword: hashedPassword,
+	}
+	user, err := cfg.dbQueries.CreateUser(
+		r.Context(), 
+		createUserParams,
+	)
 	if err != nil {
 		w.WriteHeader(400)
 		return
@@ -245,6 +259,62 @@ func (cfg *apiConfig) handleUserCreate(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(201)
+	w.Write(data)
+}
+
+func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		Password string `json:"password"`
+		Email string `json:"email"`
+	}
+
+	type returnVals struct {
+		Id string `json:"id"`
+		CreatedAt string `json:"created_at"`
+		UpdatedAt string `json:"updated_at"`
+		Email string `json:"email"`
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err := decoder.Decode(&params)
+	if err != nil {
+		w.WriteHeader(400)
+		return
+	}
+
+	user, err := cfg.dbQueries.GetUserByEmail(
+		r.Context(), 
+		sql.NullString{String: params.Email, Valid: true},
+	)
+	if err != nil {
+		w.WriteHeader(400)
+		log.Fatalf("failed to fetch user by email: %w", err)
+		return
+	}
+
+	passwordMatch, err := auth.CheckPasswordHash(params.Password, user.HashedPassword)
+	if err != nil {
+		w.WriteHeader(400)
+		log.Fatalf("failed to check password: %w", err)
+		return
+	}
+	if !passwordMatch {
+		w.WriteHeader(401)
+		w.Write([]byte(`Incorrect email or password`))
+		return
+	}
+
+	returnVal := returnVals{
+		Id: user.ID.String(),
+		CreatedAt: user.CreatedAt.Time.Format(time.RFC3339),
+		UpdatedAt: user.UpdatedAt.Time.Format(time.RFC3339),
+		Email: user.Email.String,
+	}
+	data, _ := json.Marshal(returnVal)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
 	w.Write(data)
 }
 
@@ -274,7 +344,11 @@ func main() {
 	// API
 	mux.Handle("GET /api/healthz", middlewareLog(http.HandlerFunc(handleHealthz)))
 
+	// Users
 	mux.Handle("POST /api/users", middlewareLog(http.HandlerFunc(apiConfig.handleUserCreate)))
+	mux.Handle("POST /api/login", middlewareLog(http.HandlerFunc(apiConfig.handleLogin)))
+
+	// Chirps
 	mux.Handle("POST /api/chirps", middlewareLog(http.HandlerFunc(apiConfig.handleChirpCreate)))
 	mux.Handle("GET /api/chirps", middlewareLog(http.HandlerFunc(apiConfig.handleGetChirps)))
 	mux.Handle("GET /api/chirps/{chirpId}", middlewareLog(http.HandlerFunc(apiConfig.handleGetChirp)))
