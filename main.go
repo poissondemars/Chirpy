@@ -22,6 +22,25 @@ import (
 type apiConfig struct {
 	fileserverHits atomic.Int32
 	dbQueries *database.Queries
+	jwtSecret string
+}
+
+func (cfg *apiConfig) middlewareAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		jwtToken, err := auth.GetBearerToken(r.Header)
+		if err != nil {
+			w.WriteHeader(401)
+			return
+		}
+
+		_, err = auth.ValidateJWT(jwtToken, cfg.jwtSecret)
+		if err != nil {
+			w.WriteHeader(401)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -119,7 +138,6 @@ func (cfg *apiConfig) handleGetChirps(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(200)
 	w.Write(data)
 }
-
 
 func (cfg *apiConfig) handleChirpCreate(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
@@ -328,8 +346,10 @@ func main() {
 
 	// Setting up server
 	mux := http.NewServeMux()
+	jwtSecret := os.Getenv("JWT_SECRET")
 	apiConfig := &apiConfig{
 		dbQueries: database.New(db),
+		jwtSecret: jwtSecret,
 	}
 
 	// App
@@ -347,7 +367,7 @@ func main() {
 	mux.Handle("POST /api/login", middlewareLog(http.HandlerFunc(apiConfig.handleLogin)))
 
 	// Chirps
-	mux.Handle("POST /api/chirps", middlewareLog(http.HandlerFunc(apiConfig.handleChirpCreate)))
+	mux.Handle("POST /api/chirps", middlewareLog(apiConfig.middlewareAuth(http.HandlerFunc(apiConfig.handleChirpCreate))))
 	mux.Handle("GET /api/chirps", middlewareLog(http.HandlerFunc(apiConfig.handleGetChirps)))
 	mux.Handle("GET /api/chirps/{chirpId}", middlewareLog(http.HandlerFunc(apiConfig.handleGetChirp)))
 

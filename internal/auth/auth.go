@@ -1,7 +1,10 @@
 package auth
 
 import (
+	"errors"
 	"fmt"
+	"net/http"
+	"strings"
 	"time"
 
 	"github.com/alexedwards/argon2id"
@@ -64,4 +67,19 @@ func ValidateJWT(tokenString, tokenSecret string) (uuid.UUID, error) {
 	}
 
 	return userUUID, nil
+}
+
+func GetBearerToken(headers http.Header) (string, error) {
+	tokenString := headers.Get("Authorization")
+	if len(tokenString) == 0 {
+		return "", errors.New("could not find authrorization header")
+	}
+
+	tokenParts := strings.Split(tokenString, " ")
+	if len(tokenParts) != 2 {
+		return "", errors.New("malformed token")
+	}
+
+	token := tokenParts[1]
+	return token, nil
 }
