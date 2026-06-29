@@ -21,3 +21,12 @@ UPDATE users SET
     hashed_password = $3
 WHERE id = $1
 RETURNING *;
+
+-- name: UpdateUserToChirpyRed :one
+UPDATE users SET 
+    is_chirpy_red = $2
+WHERE id = $1
+RETURNING *;
+
+-- name: UsersDeleteAll :exec
+DELETE FROM users;

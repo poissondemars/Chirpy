@@ -24,6 +24,7 @@ type apiConfig struct {
 	fileserverHits atomic.Int32
 	dbQueries *database.Queries
 	jwtSecret string
+	polkaKey string
 }
 
 func (cfg *apiConfig) checkUserAuth(r *http.Request) (uuid.UUID, error) {
@@ -60,8 +61,31 @@ func (cfg *apiConfig) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	`, cfg.fileserverHits.Load())
 }
 
-func (cfg *apiConfig) handleResetMetrics(w http.ResponseWriter, r *http.Request) {
+func (cfg *apiConfig) handleReset(w http.ResponseWriter, r *http.Request) {
 	cfg.fileserverHits.Store(0)
+
+	err := cfg.dbQueries.RefreshTokensDeleteAll(r.Context())
+	if err != nil {
+		log.Printf("Failed to reset RefreshTokens: %v", err)
+		w.WriteHeader(400)
+		return
+	}
+
+	err = cfg.dbQueries.ChirpsDeleteAll(r.Context())
+	if err != nil {
+		log.Printf("Failed to reset Chirps: %v", err)
+		w.WriteHeader(400)
+		return
+	}
+
+	err = cfg.dbQueries.UsersDeleteAll(r.Context())
+	if err != nil {
+		log.Printf("Failed to reset Users: %v", err)
+		w.WriteHeader(400)
+		return
+	}
+
+	w.WriteHeader(200)
 }
 
 func (cfg *apiConfig) handleGetChirp(w http.ResponseWriter, r *http.Request) {
@@ -97,6 +121,40 @@ func (cfg *apiConfig) handleGetChirp(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
 	w.Write(data)
+}
+
+func (cfg *apiConfig) handleDeleteChirp(w http.ResponseWriter, r *http.Request) {
+	userId, err := cfg.checkUserAuth(r)
+	if err != nil {
+		w.WriteHeader(401)
+		return
+	}
+	
+	chirpId, err := uuid.Parse(r.PathValue("chirpId"))
+	if err != nil {
+		w.WriteHeader(400)
+		return
+	}
+
+	chirp, err := cfg.dbQueries.GetChirp(r.Context(), chirpId)
+	if err != nil {
+		w.WriteHeader(404)
+		return
+	}
+
+	if userId != chirp.UserID.UUID {
+		w.WriteHeader(403)
+		return
+	}
+
+	// Delete
+	err = cfg.dbQueries.DeleteChirp(r.Context(), chirp.ID)
+	if err != nil {
+		w.WriteHeader(400)
+		return
+	}
+
+	w.WriteHeader(204)
 }
 
 func (cfg *apiConfig) handleGetChirps(w http.ResponseWriter, r *http.Request) {
@@ -235,6 +293,7 @@ func (cfg *apiConfig) handleUserCreate(w http.ResponseWriter, r *http.Request) {
 		CreatedAt string `json:"created_at"`
 		UpdatedAt string `json:"updated_at"`
 		Email string `json:"email"`
+		IsChirpyRed bool `json:"is_chirpy_red"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
@@ -268,6 +327,7 @@ func (cfg *apiConfig) handleUserCreate(w http.ResponseWriter, r *http.Request) {
 		CreatedAt: user.CreatedAt.Time.Format(time.RFC3339),
 		UpdatedAt: user.UpdatedAt.Time.Format(time.RFC3339),
 		Email: user.Email.String,
+		IsChirpyRed: user.IsChirpyRed,
 	}
 	data, _ := json.Marshal(returnVal)
 
@@ -287,6 +347,7 @@ func (cfg *apiConfig) handleUserUpdate(w http.ResponseWriter, r *http.Request) {
 		CreatedAt string `json:"created_at"`
 		UpdatedAt string `json:"updated_at"`
 		Email string `json:"email"`
+		IsChirpyRed bool `json:"is_chirpy_red"`
 	}
 
 	userId, err := cfg.checkUserAuth(r)
@@ -325,6 +386,7 @@ func (cfg *apiConfig) handleUserUpdate(w http.ResponseWriter, r *http.Request) {
 		CreatedAt: updatedUser.CreatedAt.Time.Format(time.RFC3339),
 		UpdatedAt: updatedUser.UpdatedAt.Time.Format(time.RFC3339),
 		Email: updatedUser.Email.String,
+		IsChirpyRed: updatedUser.IsChirpyRed,
 	}
 	data, _ := json.Marshal(returnVal)
 
@@ -346,6 +408,7 @@ func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Email string `json:"email"`
 		Token string `json:"token"`
 		RefreshToken string `json:"refresh_token"`
+		IsChirpyRed bool `json:"is_chirpy_red"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
@@ -401,6 +464,7 @@ func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Email: user.Email.String,
 		Token: jwtToken,
 		RefreshToken: refreshToken.Token,
+		IsChirpyRed: user.IsChirpyRed,
 	}
 	data, _ := json.Marshal(returnVal)
 
@@ -502,6 +566,52 @@ func (cfg *apiConfig) handleRevokeToken(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(204)
 }
 
+func (cfg *apiConfig) handlePolkaWebhook(w http.ResponseWriter, r *http.Request) {
+	type userData struct {
+		UserId uuid.UUID `json:"user_id"`
+	}
+
+	type parameters struct {
+		Event string `json:"event"`
+		UserData userData `json:"data"`
+	}
+
+	apiKey, err := auth.GetAPIKey(r.Header)
+	if err != nil {
+		w.WriteHeader(401)
+		return
+	}
+	if apiKey != cfg.polkaKey {
+		w.WriteHeader(401)
+		return
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err = decoder.Decode(&params)
+	if err != nil {
+		w.WriteHeader(400)
+		return
+	}
+
+	if params.Event != "user.upgraded" {
+		w.WriteHeader(204)
+		return
+	}
+
+	dbParams := database.UpdateUserToChirpyRedParams{
+		ID: params.UserData.UserId,
+		IsChirpyRed: true,
+	}
+	_, err = cfg.dbQueries.UpdateUserToChirpyRed(r.Context(), dbParams)
+	if err != nil {
+		w.WriteHeader(404)
+		return
+	}
+
+	w.WriteHeader(204)
+}
+
 func main() {
 	godotenv.Load()
 
@@ -515,9 +625,11 @@ func main() {
 	// Setting up server
 	mux := http.NewServeMux()
 	jwtSecret := os.Getenv("JWT_SECRET")
+	polkaKey := os.Getenv("POLKA_KEY")
 	apiConfig := &apiConfig{
 		dbQueries: database.New(db),
 		jwtSecret: jwtSecret,
+		polkaKey: polkaKey,
 	}
 
 	// App
@@ -525,7 +637,7 @@ func main() {
 
 	// Admin
 	mux.Handle("GET /admin/metrics", middlewareLog(http.HandlerFunc(apiConfig.handleMetrics)))
-	mux.Handle("POST /admin/reset", middlewareLog(http.HandlerFunc(apiConfig.handleResetMetrics)))
+	mux.Handle("POST /admin/reset", middlewareLog(http.HandlerFunc(apiConfig.handleReset)))
 
 	// API
 	mux.Handle("GET /api/healthz", middlewareLog(http.HandlerFunc(handleHealthz)))
@@ -541,6 +653,9 @@ func main() {
 	mux.Handle("POST /api/chirps", middlewareLog(http.HandlerFunc(apiConfig.handleChirpCreate)))
 	mux.Handle("GET /api/chirps", middlewareLog(http.HandlerFunc(apiConfig.handleGetChirps)))
 	mux.Handle("GET /api/chirps/{chirpId}", middlewareLog(http.HandlerFunc(apiConfig.handleGetChirp)))
+	mux.Handle("DELETE /api/chirps/{chirpId}", middlewareLog(http.HandlerFunc(apiConfig.handleDeleteChirp)))
+
+	mux.Handle("POST /api/polka/webhooks", middlewareLog(http.HandlerFunc(apiConfig.handlePolkaWebhook)))
 
 	server := &http.Server{
 		Addr:    ":8080",
