@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"errors"
 	"net/http"
 	"os"
 	"strings"
@@ -25,22 +26,18 @@ type apiConfig struct {
 	jwtSecret string
 }
 
-func (cfg *apiConfig) middlewareAuth(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		jwtToken, err := auth.GetBearerToken(r.Header)
-		if err != nil {
-			w.WriteHeader(401)
-			return
-		}
+func (cfg *apiConfig) checkUserAuth(r *http.Request) (uuid.UUID, error) {
+	jwtToken, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		return uuid.UUID{}, errors.New("failed to extract bearer token")
+	}
 
-		_, err = auth.ValidateJWT(jwtToken, cfg.jwtSecret)
-		if err != nil {
-			w.WriteHeader(401)
-			return
-		}
+	userUUID, err := auth.ValidateJWT(jwtToken, cfg.jwtSecret)
+	if err != nil {
+		return uuid.UUID{}, errors.New("failed to validate token")
+	}
 
-		next.ServeHTTP(w, r)
-	})
+	return userUUID, nil
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -142,7 +139,6 @@ func (cfg *apiConfig) handleGetChirps(w http.ResponseWriter, r *http.Request) {
 func (cfg *apiConfig) handleChirpCreate(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
 		Body string `json:"body"`
-		UserId string `json:"user_id"`
 	}
 
 	type errorResp struct {
@@ -157,15 +153,15 @@ func (cfg *apiConfig) handleChirpCreate(w http.ResponseWriter, r *http.Request) 
 		UserId string `json:"user_id"`
 	}
 
-	decoder := json.NewDecoder(r.Body)
-	params := parameters{}
-	err := decoder.Decode(&params)
+	userId, err := cfg.checkUserAuth(r)
 	if err != nil {
-		w.WriteHeader(400)
+		w.WriteHeader(401)
 		return
 	}
 
-	userId, err := uuid.Parse(params.UserId)
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err = decoder.Decode(&params)
 	if err != nil {
 		w.WriteHeader(400)
 		return
@@ -291,6 +287,8 @@ func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
 		CreatedAt string `json:"created_at"`
 		UpdatedAt string `json:"updated_at"`
 		Email string `json:"email"`
+		Token string `json:"token"`
+		RefreshToken string `json:"refresh_token"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
@@ -321,17 +319,130 @@ func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	expiresIn := time.Duration(1 * 60 * 60 * time.Second)
+	jwtToken, err :=  auth.MakeJWT(user.ID, cfg.jwtSecret, expiresIn)
+	if err != nil {
+		w.WriteHeader(400)
+		return
+	}
+
+	refreshTokenParams := database.CreateRefreshTokenParams{
+		Token: auth.MakeRefreshToken(),
+		UserID: uuid.NullUUID{UUID: user.ID, Valid: true},
+		ExpiresAt: sql.NullTime{Time: time.Now().Add(60 * 24 * time.Hour), Valid: true},
+	}
+	refreshToken, err := cfg.dbQueries.CreateRefreshToken(r.Context(), refreshTokenParams)
+	if err != nil {
+		w.WriteHeader(400)
+		return
+	}
+
 	returnVal := returnVals{
 		Id: user.ID.String(),
 		CreatedAt: user.CreatedAt.Time.Format(time.RFC3339),
 		UpdatedAt: user.UpdatedAt.Time.Format(time.RFC3339),
 		Email: user.Email.String,
+		Token: jwtToken,
+		RefreshToken: refreshToken.Token,
 	}
 	data, _ := json.Marshal(returnVal)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
 	w.Write(data)
+}
+
+func (cfg *apiConfig) handleRefreshToken(w http.ResponseWriter, r *http.Request) {
+	refreshTokenString, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		w.WriteHeader(400)
+		return
+	}
+
+	refreshToken, err := cfg.dbQueries.GetRefreshToken(r.Context(), refreshTokenString)
+	// Entity doesn't exist
+	if err != nil {
+		w.WriteHeader(401)
+		return
+	}
+	// Token revoked
+	if refreshToken.RevokedAt.Valid == true {
+		w.WriteHeader(401)
+		return
+	}
+	// Token revoked
+	if refreshToken.ExpiresAt.Valid == false {
+		w.WriteHeader(401)
+		return
+	}
+	// Token expired
+	if time.Now().After(refreshToken.ExpiresAt.Time) {
+		w.WriteHeader(401)
+		return
+	}
+
+	type returnValues struct {
+		Token string `json:"token"`
+	}
+
+	// create new jwt
+	expiresIn := time.Duration(1 * 60 * 60 * time.Second)
+	newJwtToken, err := auth.MakeJWT(refreshToken.UserID.UUID, cfg.jwtSecret, expiresIn)
+	if err != nil {
+		w.WriteHeader(400)
+		return
+	}
+
+	returnVals := returnValues{
+		Token: newJwtToken,
+	}
+	data, err := json.Marshal(returnVals)
+	if err != nil {
+		w.WriteHeader(400)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	w.Write(data)
+}
+
+func (cfg *apiConfig) handleRevokeToken(w http.ResponseWriter, r *http.Request) {
+	refreshTokenString, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		w.WriteHeader(400)
+		return
+	}
+
+	refreshToken, err := cfg.dbQueries.GetRefreshToken(r.Context(), refreshTokenString)
+	// Entity doesn't exist
+	if err != nil {
+		w.WriteHeader(401)
+		return
+	}
+	// Token revoked
+	if refreshToken.RevokedAt.Valid == true {
+		w.WriteHeader(401)
+		return
+	}
+	// Token revoked
+	if refreshToken.ExpiresAt.Valid == false {
+		w.WriteHeader(401)
+		return
+	}
+	// Token expired
+	if time.Now().After(refreshToken.ExpiresAt.Time) {
+		w.WriteHeader(401)
+		return
+	}
+
+	err = cfg.dbQueries.RevokeRefreshToken(r.Context(), refreshTokenString)
+	if err != nil {
+		w.WriteHeader(400)
+		return
+	}
+
+	w.WriteHeader(204)
 }
 
 func main() {
@@ -365,9 +476,11 @@ func main() {
 	// Users
 	mux.Handle("POST /api/users", middlewareLog(http.HandlerFunc(apiConfig.handleUserCreate)))
 	mux.Handle("POST /api/login", middlewareLog(http.HandlerFunc(apiConfig.handleLogin)))
+	mux.Handle("POST /api/refresh", middlewareLog(http.HandlerFunc(apiConfig.handleRefreshToken)))
+	mux.Handle("POST /api/revoke", middlewareLog(http.HandlerFunc(apiConfig.handleRevokeToken)))
 
 	// Chirps
-	mux.Handle("POST /api/chirps", middlewareLog(apiConfig.middlewareAuth(http.HandlerFunc(apiConfig.handleChirpCreate))))
+	mux.Handle("POST /api/chirps", middlewareLog(http.HandlerFunc(apiConfig.handleChirpCreate)))
 	mux.Handle("GET /api/chirps", middlewareLog(http.HandlerFunc(apiConfig.handleGetChirps)))
 	mux.Handle("GET /api/chirps/{chirpId}", middlewareLog(http.HandlerFunc(apiConfig.handleGetChirp)))
 
