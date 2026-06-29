@@ -3,11 +3,13 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
-	"errors"
 	"net/http"
 	"os"
+	"sort"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -16,8 +18,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
-	"github.com/poissondemars/Chirpy/internal/database"
 	"github.com/poissondemars/Chirpy/internal/auth"
+	"github.com/poissondemars/Chirpy/internal/database"
 )
 
 type apiConfig struct {
@@ -166,10 +168,27 @@ func (cfg *apiConfig) handleGetChirps(w http.ResponseWriter, r *http.Request) {
 		UserId string `json:"user_id"`
 	}
 
-	chirps, err := cfg.dbQueries.GetChirps(r.Context())
+	var userIdParam uuid.NullUUID
+	userId, err := uuid.Parse(r.URL.Query().Get("author_id"))
+	if err != nil {
+		log.Println("could not parse author_id query param")
+	} else if userId != uuid.Nil {
+		userIdParam = uuid.NullUUID{UUID: userId, Valid: true}
+	}
+	
+	chirps, err := cfg.dbQueries.GetChirps(r.Context(), userIdParam)
 	if err != nil {
 		w.WriteHeader(500)
 		return
+	}
+
+	sortOrder := r.URL.Query().Get("sort")
+	validSorts := []string{"asc", "desc"}
+	if !slices.Contains(validSorts, sortOrder) {
+		sortOrder = "asc"
+	}
+	if sortOrder == "desc" {
+		sort.Slice(chirps, func(i, j int) bool { return chirps[i].CreatedAt.Time.After(chirps[j].CreatedAt.Time) })
 	}
 
 	response := []chirp{}
