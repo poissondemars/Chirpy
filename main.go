@@ -276,6 +276,63 @@ func (cfg *apiConfig) handleUserCreate(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
+func (cfg *apiConfig) handleUserUpdate(w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		Email string `json:"email"`
+		Password string `json:"password"`
+	}
+
+	type returnVals struct {
+		Id string `json:"id"`
+		CreatedAt string `json:"created_at"`
+		UpdatedAt string `json:"updated_at"`
+		Email string `json:"email"`
+	}
+
+	userId, err := cfg.checkUserAuth(r)
+	if err != nil {
+		w.WriteHeader(401)
+		return
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err = decoder.Decode(&params)
+	if err != nil {
+		w.WriteHeader(400)
+		return
+	}
+
+	hashedPassword, err := auth.HashPassword(params.Password)	
+	if err != nil {
+		w.WriteHeader(400)
+		return
+	}
+
+	updateParams := database.UpdateUserParams{
+		ID: 			userId,
+		Email:			sql.NullString{String: params.Email, Valid: true},
+		HashedPassword: hashedPassword,
+	}
+	updatedUser, err := cfg.dbQueries.UpdateUser(r.Context(), updateParams)
+	if err != nil {
+		w.WriteHeader(400)
+		return
+	}
+
+	returnVal := returnVals{
+		Id: updatedUser.ID.String(),
+		CreatedAt: updatedUser.CreatedAt.Time.Format(time.RFC3339),
+		UpdatedAt: updatedUser.UpdatedAt.Time.Format(time.RFC3339),
+		Email: updatedUser.Email.String,
+	}
+	data, _ := json.Marshal(returnVal)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	w.Write(data)
+}
+
 func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
 		Password string `json:"password"`
@@ -475,6 +532,7 @@ func main() {
 
 	// Users
 	mux.Handle("POST /api/users", middlewareLog(http.HandlerFunc(apiConfig.handleUserCreate)))
+	mux.Handle("PUT /api/users", middlewareLog(http.HandlerFunc(apiConfig.handleUserUpdate)))
 	mux.Handle("POST /api/login", middlewareLog(http.HandlerFunc(apiConfig.handleLogin)))
 	mux.Handle("POST /api/refresh", middlewareLog(http.HandlerFunc(apiConfig.handleRefreshToken)))
 	mux.Handle("POST /api/revoke", middlewareLog(http.HandlerFunc(apiConfig.handleRevokeToken)))
